@@ -1,0 +1,683 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\IncomingItem;
+use App\Models\PODetail;
+use App\Models\UsedItem;
+use Carbon\Carbon;
+use Helper;
+use Illuminate\Http\Request;
+
+use DataTables;
+use Auth;
+
+use App\Models\PO;
+use App\Models\Item;
+use App\Models\Stock;
+use App\Models\StockHistory;
+use App\Models\BatchBarcode;
+use App\Models\BatchBarcodeDetail;
+use Illuminate\Support\Facades\DB;
+
+class BatchBarcodeController extends Controller
+{
+    protected function datatables()
+    {
+        $no = 1;
+        $data = [];
+
+        $query = BatchBarcode::where(['is_delete' => 'N'])->orderBy('batch_barcode_id', 'desc')->get();
+
+        foreach ($query as $list) {
+
+            $list['no'] = $no++;
+            $list['batch_barcode'] = "<a href=\" ".route('batch_barcode.detail', $list->batch_barcode_id)." \">".$list->batch_barcode."</a>";
+            $list['batch_barcode_desc'] = $list->batch_barcode_desc;
+            
+            $list['aksi'] = '
+                <a href="#" class="btn btn-sm btn-primary  btn-edit" title="Edit" data-id="'.$list->batch_barcode_id.'"><i class="fa fa-pen fa-sm"></i></a>&nbsp;
+                <a href="#" class="btn btn-sm btn-warning  btn-print" title="Print" data-id="'.$list->batch_barcode_id.'"><i class="fa fa-barcode fa-sm"></i></a>
+            ';
+
+            if($list->is_lock == 'Y' ){
+                
+                $list['is_lock'] = '<span class="badge badge-success"> <i class="fa fa-check"></i> </span>';
+                
+            }else{
+                
+                $list['is_lock'] = '<span class="badge badge-danger"> <i class="fa fa-times"></i> </span>';
+                
+                $list['aksi'] .= '<button class="btn btn-success btn-lock btn-sm mr-1" data-type="lock" data-id="'.$list->batch_barcode_id.'"> 
+                <i class="fa fa-lock text-white"></i></button>';
+                $list['aksi'] .= '<a href="#" class="btn btn-sm btn-danger  btn-hapus" title="Hapus" data-id="'.$list->batch_barcode_id.'"><i class="fa fa-trash fa-sm"></i></a>';
+                
+            }
+            
+            
+            $data[] = $list;
+        }
+
+        return DataTables::of($data)->escapeColumns([])->make(true);
+    }
+
+    protected function datatables_detail(Request $request)
+    {
+        $no = 1;
+        $data = [];
+
+        $lists = BatchBarcodeDetail::where([
+            'is_delete' => 'N',
+            'batch_barcode_id' => $request->batch_barcode_id,
+        ])->with('batch_barcode', 'item.color')->orderBy('batch_barcode_detail_id', 'asc')->get();
+
+        foreach ($lists as $list) {
+
+            $list['batch_barcode_detail_id'] = $list->batch_barcode_detail_id;
+            $list['barcode']                 = $list->barcode;
+            $list['item_name']               = @$list->item->item_name;
+            $list['color']                   = @$list->item->color->color_name ?? "-";
+            $list['size']                    = @$list->item->item_size;
+            $list['inbound'] = $list->is_inbound == "Y" ? "<i class='text-success fa fa-check'></i>" : "<i class='text-danger fa fa-times'></i>";
+            $list['outbound'] = $list->is_outbound == "Y" ? "<i class='text-success fa fa-check'></i>" : "<i class='text-danger fa fa-times'></i>";
+
+            $list['action'] = '
+                <input type="hidden" name="batch_barcode_detail_id[]" value="'.$list->batch_barcode_detail_id.'">
+                <a href="'.route('batch_barcode.print_barcode_detail_single', ['id' => $list->batch_barcode_id, 'batch_barcode_detail_id' => $list->batch_barcode_detail_id]).'" class="btn btn-warning" target="_blank">
+                    <i class="fa fa-barcode"></i>
+                </a>
+            ';
+            
+            $list['qty'] = $list->qty;
+            
+            
+            $data[] = $list;
+        }
+
+        return DataTables::of($data)->escapeColumns([])->make(true);
+    }
+
+    public function nomer_urut()
+    {
+
+        // Ambil nomor urut terakhir dari database
+        $lastNomorUrut = BatchBarcode::count('batch_barcode_id');
+        $nextNomorUrut = intval(substr($lastNomorUrut, -4)) + 1; // Ambil 4 digit terakhir dari nomor urut terakhir dan tambahkan 1
+        $tanggal       = Carbon::now()->format('ymd'); // Ambil tanggal saat ini dengan format ymd
+        $nomorUrut     = sprintf("%04d", $nextNomorUrut); // Ambil nomor urut berikutnya dan format dengan 4 digit angka
+        $nomorUrut     = "".$tanggal . $nomorUrut;
+
+        return $nomorUrut;
+
+    }
+    
+    public function check_batch()
+    {
+
+        $batch_barcode = BatchBarcode::where([
+            'is_delete' => 'N',
+            'is_lock' => 'N',
+        ])->count();
+
+        return response()->json($batch_barcode, 200);
+
+    }
+    
+    protected function index(Request $request)
+    {
+        return view('master.batch_barcode.index');
+    }
+
+    public function print_barcode($id)
+    {
+
+        $batch_barcode = BatchBarcode::where('batch_barcode_id', $id)->first();
+
+        return view('master.batch_barcode.print_barcode', compact('batch_barcode'));
+    }
+
+    public function print_barcode_detail_single(BatchBarcode $id, BatchBarcodeDetail $batch_barcode_detail_id)
+    {
+
+        $batch_barcode_detail = $batch_barcode_detail_id;
+
+        return view('master.batch_barcode.print_barcode_detail_single', compact('batch_barcode_detail'));
+    }
+
+    public function print_barcode_detail($id)
+    {
+
+        $batch_barcode_detail = BatchBarcodeDetail::where('batch_barcode_id', $id)->where('is_outbound', 'N')->get();
+
+        return view('master.batch_barcode.print_barcode_detail', compact('batch_barcode_detail'));
+    }
+
+    public function detail(BatchBarcode $id)
+    {
+
+        $batch_barcode = $id;
+        $item = Item::where('is_delete', 'N')->get();
+
+        return view("master.batch_barcode.detail", compact("batch_barcode", "item"));
+
+    }
+
+    protected function save(Request $request)
+    {
+
+        DB::beginTransaction();
+
+        try {
+            
+            BatchBarcode::create([
+                'batch_barcode'      => $this->nomer_urut(),
+                'batch_barcode_desc' => $request->batch_barcode_desc,
+                'barcode_img'        => null,
+                'input_by'           => Auth::user()->username,
+                'input_date'         => date('Y-m-d H:i:s'),
+            ]);
+
+            DB::commit();
+
+            return response()->json([
+                'status' => 'success',
+                'icon'   => 'success',
+                'title'  => 'Saved',
+            ], 200);
+
+        } catch (\Throwable $th) {
+            
+            DB::rollBack();
+
+            return response()->json([
+                'status' => 'error',
+                'icon'   => 'error',
+                'title'  => 'Failed',
+                'message' => $th->getMessage(),
+            ], 500);
+
+        }
+
+    }
+
+    public function save_detail(Request $request)
+    {
+
+        try {
+            
+            DB::transaction(function() use($request) {
+
+                if( isset($request->id_po_detail) ){
+
+                    foreach( $request->id_po_detail as $key => $id_po_detail ){
+
+                        PODetail::where([
+                            "id_po" => $request->id_po,
+                            "id_po_detail" => $id_po_detail,
+                        ])->update([
+                            "qty" => $request->qty[$id_po_detail],
+                        ]);
+
+                    }
+
+                }
+
+            });
+
+            return response()->json(['message' => 'success'], 200);
+
+        } catch (\Throwable $th) {
+            
+            return response()->json(['message' => 'error', 'th' => $th->getMessage()], 500);
+
+        }
+
+    }
+
+    protected function lock(Request $request)
+    {
+
+        DB::beginTransaction();
+
+        try {
+
+            $type = $request->type == 'lock' ? 'Y' : 'N';
+
+            BatchBarcode::where('batch_barcode_id', $request->batch_barcode_id)->update([
+                'is_lock'        => $type,
+                'lock_last_by'   => Auth::user()->username,
+                'lock_last_date' => date('Y-m-d H:i:s'),
+            ]);
+            
+            DB::commit();
+
+            return response()->json([
+                'icon'   => 'success',
+                'title'  => 'Success',
+                'status' => 'success',
+            ], 200);
+
+        } catch (\Throwable $th) {
+            
+            DB::rollBack();
+
+            return response()->json([
+                'icon'   => 'error',
+                'title'  => 'Failed',
+                'status' => 'error',
+            ], 500);
+
+        }
+
+    }
+
+    public function finish(Request $request)
+    {
+
+      DB::beginTransaction();
+
+        try {
+
+          $count = PODetail::where([
+            "id_po" => $request->id_po,
+            "is_delete" => "N"
+          ])->count();
+
+          if( $count > 0 ){
+            
+            PO::where("id_po", $request->id_po)->update([
+                'status' => 'finish',
+            ]);
+
+            DB::commit();
+
+            return response()->json([
+              'status' => 'success',
+              'icon' => 'success',
+              'title' => 'Finished!'
+            ], 200);
+
+          }else{
+
+            return response()->json([
+              'status' => 'warning',
+              'icon' => 'warning',
+              'title' => 'Cant finish at least have one item!',
+            ], 200);
+
+          }
+
+        } catch (\Throwable $th) {
+
+          DB::rollBack();
+            
+          return response()->json(['message' => 'error', 'th' => $th->getMessage()], 500);
+
+        }
+
+    }
+
+    protected function edit(Request $request)
+    {
+        $data = BatchBarcode::findOrFail($request->batch_barcode_id);
+
+        return response()->json($data, 200);
+    }
+
+    protected function update( Request $request)
+    {
+
+        DB::beginTransaction();
+
+        try {
+
+            BatchBarcode::where('batch_barcode_id', $request->batch_barcode_id)->update([
+                'batch_barcode_desc' => $request->batch_barcode_desc,
+                'edit_by'            => Auth::user()->username,
+                'edit_date'          => date('Y-m-d H:i:s'),
+            ]);
+            
+            DB::commit();
+
+            return response()->json([
+                'icon'   => 'success',
+                'status' => 'success',
+                'title'  => 'Saved!',
+            ], 200);
+
+        } catch (\Throwable $th) {
+            
+            DB::rollBack();
+
+            return response()->json([
+                'icon'   => 'error',
+                'status' => 'error',
+                'title'  => 'Failed!',
+            ], 500);
+
+        }
+
+    }
+
+    protected function delete(Request $request)
+    {
+
+        DB::beginTransaction();
+
+        try {
+
+            BatchBarcode::where('batch_barcode_id', $request->batch_barcode_id)->update([
+                'is_delete'   => 'Y',
+                'delete_by'   => Auth::user()->username,
+                'delete_date' => date('Y-m-d H:i:s'),
+            ]);
+            
+            DB::commit();
+
+            return response()->json([
+                'icon'   => 'success',
+                'status' => 'success',
+                'title'  => 'Deleted!',
+            ], 200);
+
+        } catch (\Throwable $th) {
+            
+            DB::rollBack();
+
+            return response()->json([
+                'icon'   => 'error',
+                'status' => 'error',
+                'title'  => 'Failed!',
+            ], 500);
+
+        }
+
+    }
+
+    protected function delete_item(Request $request)
+    {
+
+        DB::beginTransaction();
+
+        try {
+
+            BatchBarcodeDetail::whereIn('batch_barcode_detail_id', $request->batch_barcode_detail_id)->update([
+                'is_delete'   => 'Y',
+            ]);
+
+            // // re-generated item barcode
+            // $item_id = DB::select(DB::raw(" SELECT DISTINCT item_id FROM batch_barcode_detail WHERE batch_barcode_detail_id IN (".implode(',', $request->batch_barcode_detail_id).") "));
+
+            // foreach( $item_id as $id ){
+            //     Helper::barcode_regenerate($request->batch_barcode_id, $id->item_id, "batch_barcode");
+            // }
+
+            $items_id = DB::select(DB::raw(" SELECT DISTINCT item_id FROM batch_barcode_detail WHERE batch_barcode_detail_id IN (".implode(',', $request->batch_barcode_detail_id).") "));
+
+            foreach( $items_id as $key => $item ){
+
+                $item = Item::where("item_id", $item->item_id)->first();
+
+                $count = BatchBarcodeDetail::leftJoin('batch_barcode', function($join){
+                    $join->on('batch_barcode.batch_barcode_id', '=', 'batch_barcode_detail.batch_barcode_id');
+                })->where([
+                    "batch_barcode_detail.item_id"   => $item->item_id,
+                    "batch_barcode_detail.is_delete" => "N",
+                ])->where('batch_barcode_detail.batch_barcode_id', '!=', $request->batch_barcode_id)->count();
+
+                $count = $count == 0 ? 1 : $count+1;
+
+                $batch_barcode_detail = BatchBarcodeDetail::where([
+                    'batch_barcode_id' => $request->batch_barcode_id,
+                    'item_id'          => $item->item_id,
+                    'is_delete'        => 'N',
+                ])->orderBy('batch_barcode_detail_id', 'asc')->get();
+
+                foreach($batch_barcode_detail as $bbd_item){
+
+                    $item_barcode = $item->template_barcode."-".str_pad($count++, 4, '0', STR_PAD_LEFT);
+
+                    BatchBarcodeDetail::where('batch_barcode_detail_id', $bbd_item->batch_barcode_detail_id)->update([
+                        'barcode' => $item_barcode,
+                    ]);
+
+                }
+
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'status' => 'success',
+                'title' => 'Item deleted!',
+                'icon' => 'success',
+            ], 200);
+
+        } catch (\Throwable $th) {
+
+            DB::rollBack();
+
+            return response()->json([
+                'status' => 'error',
+                'title' => 'failed delete item!',
+                'icon' => 'error',
+                'message' => $th->getMessage(),
+                'line' => $th->getLine(),
+            ], 500);
+
+        }
+
+
+
+    }
+
+    protected function restore($id)
+    {
+        $incoming_item = PO::findOrFail($id);
+
+        $incoming_item->update(['is_delete' => 'N']);
+
+        return response()->json(['status' => 'success'], 200);
+    }
+
+    public function get_incoming_item(Request $request)
+    {
+
+        $incoming_item = PO::where('no_po', 'like', '%'.$request->q.'%')->where('is_delete', 'N')->where('status', 'finish')->get();
+
+        return response()->json($incoming_item, 200);
+
+    }
+
+    public function get_po_detail(Request $request)
+    {
+
+        $po_detail = PODetail::where('id_po', $request->id_po)->with('item.color')->get();
+
+        return response()->json($po_detail, 200);
+
+    }
+
+    public function generate_barcode($item_id)
+    {
+        /**
+         * Number increment barcode berasal dari semua incoming detail
+         * */
+
+        
+
+
+        $barcode = "";
+
+
+
+        return $barcode;
+
+    }
+
+    protected function generate_item(Request $request)
+    {
+
+        DB::beginTransaction();
+
+        try {
+
+            if( !isset($request->item_id) ){
+
+                return response()->json([
+                    "status" => "warning",
+                    "icon"   => "warning",
+                    "title"  => "Please checklist first!",
+                ], 500);
+
+            }else{
+
+                foreach( $request->item_id as $key => $item_id ){
+    
+                    $item = Item::where("item_id", $item_id)->first();
+    
+                    $count = BatchBarcodeDetail::leftJoin('batch_barcode', function($join){
+                        $join->on('batch_barcode.batch_barcode_id', '=', 'batch_barcode_detail.batch_barcode_id');
+                    })->where([
+                        "batch_barcode_detail.item_id"   => $item_id,
+                        "batch_barcode_detail.is_delete" => "N",
+                        // "batch_barcode.is_lock"          => "Y",
+                    ])->count();
+
+                    // hanya TRO yang tidak mulai dari 1000
+                    $tro_array = ["TRO-30", "TRO-32", "TRO-33", "TRO-35", "TRO-37", "TRO-39", "TRO-41"];
+                    if( !in_array($item->template_barcode, $tro_array) ){
+                        $count = $count == 0 ? 1000 : $count+1000;
+                    }
+
+                    $count = $count == 0 ? 1 : $count+1;
+    
+    
+                    for ($i=0; $i < $request->qty[$item_id]; $i++) {
+    
+                        $item_barcode = $item->template_barcode."-".str_pad($count, 4, '0', STR_PAD_LEFT);
+    
+                        BatchBarcodeDetail::create([
+                            'batch_barcode_id' => $request->batch_barcode_id,
+                            'item_id'          => $item_id,
+                            'barcode'          => $item_barcode,
+                            'qty'              => 1,
+                            'input_by'         => Auth::user()->username,
+                            'input_date'       => date('Y-m-d H:i:s'),
+                        ]);
+    
+    
+                        $count++;
+    
+                    }
+    
+                    
+                }
+    
+                DB::commit();
+    
+                return response()->json([
+                    "status" => "success",
+                    "icon"   => "success",
+                    "title"  => "Success!",
+                ], 200);
+
+            }
+
+
+        } catch (\Throwable $th) {
+
+            DB::rollBack();
+
+            return response()->json([
+                "icon"    => "error",
+                "title"   => "Failed!",
+                "status"  => "error",
+                "message" => $th->getMessage(),
+            ], 500);
+
+        }
+
+    }
+
+    public function check(Request $request)
+    {
+
+        $incoming_item = PO::where([
+            "is_delete" => "N",
+            "status" => "pending",
+        ])->count();
+
+        if( $incoming_item == 0 ){
+            return response()->json([
+                "status" => "success",
+                "is_pass" => "Y",
+            ], 200);
+        }else{
+            return response()->json([
+                "status" => "success",
+                "is_pass" => "N",
+            ], 200);
+        }
+
+    }
+
+    public function number(Request $request)
+    {
+
+        if( strlen($request->q) >= 4 ){
+
+            if( $request->type == "inbound" ){
+
+                // already inbound
+                $get_batch_barcode_id = IncomingItem::where([
+                    "is_delete" => "N",
+                ])->get();
+
+                $batch_barcode_id_done = [];
+                foreach($get_batch_barcode_id as $value){
+                    $batch_barcode_id_done[] = $value->batch_barcode_id;
+                }
+    
+                $batch_barcode = BatchBarcode::where([
+                    'is_delete' => 'N',
+                    'is_lock'   => 'Y',
+                ])->where('batch_barcode', 'like', '%'.$request->q.'%')
+                ->whereNotIn("batch_barcode_id", $batch_barcode_id_done)
+                ->get();
+
+            }
+
+            if( $request->type == "outbound" ){
+
+                // already inbound
+                $get_batch_barcode_id = UsedItem::where([
+                    "is_delete" => "N",
+                ])->get();
+
+                $batch_barcode_id_done = [];
+                foreach($get_batch_barcode_id as $value){
+                    $batch_barcode_id_done[] = $value->batch_barcode_id;
+                }
+    
+                $batch_barcode = BatchBarcode::where([
+                    'is_delete' => 'N',
+                    'is_lock'   => 'Y',
+                ])->where('batch_barcode', 'like', '%'.$request->q.'%')
+                ->whereNotIn("batch_barcode_id", $batch_barcode_id_done)
+                ->get();
+
+            }
+
+
+        }else{
+
+            $batch_barcode = [];
+        }
+
+
+        return response()->json( $batch_barcode, 200);
+
+    }
+
+}
